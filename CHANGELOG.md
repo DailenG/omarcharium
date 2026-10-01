@@ -2,6 +2,28 @@
 
 All notable changes are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+## [1.0.11] - 2026-09-30
+
+### Changed
+
+- Default the status display to off for a text-free reef, including backdrop notices; keep existing saved choices and the control-room toggle ([#7](https://github.com/DailenG/omarcharium/issues/7)).
+
+### Security
+
+- Preview only bounded, renderer-derived backdrops in the control room; pin selected image bytes before validation and conversion.
+- Keep picker completion files private and scope duplicate-launch checks to the current user/session.
+
+### Fixed
+
+- Resolve the plugin's install directory from its QML file URL rather than the private `manifest.__sourceDir` field stripped by current Omarchy shells. Restores tray/IPC immersion and control-room data, launch, audio test, and backdrop selection ([#6](https://github.com/DailenG/omarcharium/issues/6)).
+- Read the configured `idle.screensaver` timeout from `shell.json` instead of using the 150-second fallback for ordinary third-party plugins.
+- Honor Omarchy's **Keep Awake** state for automatic immersion while retaining manual launch controls.
+- Reconcile orphaned idle ownership, fail closed when stock-saver suppression cannot be confirmed, and honor pre-existing user toggles for automatic immersion ([#9](https://github.com/DailenG/omarcharium/issues/9), [#10](https://github.com/DailenG/omarcharium/issues/10)).
+- Stage and validate the exact release tree while excluding checkout metadata from local plugin sync ([#8](https://github.com/DailenG/omarcharium/issues/8)).
+- Restore the **Select Image** button label found missing during live desktop validation.
+
 ## [1.0.10] - 2026-09-02
 
 ### Added
@@ -109,6 +131,7 @@ All notable changes are documented here. This project follows [Semantic Versioni
 - Deterministic renderer snapshots, configuration normalization, and behavioral tests.
 - Marketplace manifest, preview artwork, actual screenshots, contributor guide, security policy, and CI validation.
 
+[1.0.11]: https://github.com/DailenG/omarcharium/releases/tag/v1.0.11
 [1.0.10]: https://github.com/DailenG/omarcharium/releases/tag/v1.0.10
 [1.0.9]: https://github.com/DailenG/omarcharium/releases/tag/v1.0.9
 [1.0.8]: https://github.com/DailenG/omarcharium/releases/tag/v1.0.8

@@ -13,10 +13,16 @@ Item {
   property bool directoryReady: false
   property string pendingSaveText: ""
   property string statusLine: "CONFIGURATION SYNCHRONIZED"
+  property string backdropPreviewPath: ""
+  property string backdropPreviewError: ""
+  property bool backdropPreviewDirty: false
+  property bool backdropPreviewHandled: false
+  property bool backdropPickerSelected: false
+  property bool backdropPreviewPending: false
   property var defaults: ({
     schemaVersion: 1,
     species: { neon_tetra: 10, clownfish: 4, angelfish: 3, discus: 3, butterflyfish: 2, royal_tang: 3, betta: 1, puffer: 2 },
-    art: { palette: "lagoon", bubbleDensity: 55, current: 1.0, showTelemetry: true, reefDensity: 50 },
+    art: { palette: "lagoon", bubbleDensity: 55, current: 1.0, showTelemetry: false, reefDensity: 50 },
     backdrop: { source: "plain", imagePath: "", fitMode: "cover", dimming: 45, effectsEnabled: false, effectIntensity: 55 },
     sound: { enabled: false, volume: 24, water: true, bubbles: true },
     integration: { idleEnabled: true, exitOnPointerMotion: true }
@@ -35,7 +41,19 @@ Item {
   property real driftPhase: 0
 
   readonly property string pluginId: "dailen.omarcharium"
-  readonly property string pluginDir: manifest && manifest.__sourceDir ? String(manifest.__sourceDir) : ""
+  function fromFileUrl(url) {
+    var path = String(url || "").replace(/^file:\/\//, "").replace(/\/$/, "")
+    try { return decodeURIComponent(path) } catch (error) { return path }
+  }
+
+  function toFileUrl(path) {
+    var text = String(path || "")
+    if (!text) return ""
+    var segments = text.split("/").map(function(segment) { return encodeURIComponent(segment) })
+    return "file://" + segments.join("/")
+  }
+
+  readonly property string pluginDir: root.fromFileUrl(Qt.resolvedUrl("."))
   readonly property string configDir: Quickshell.env("HOME") + "/.config/omarcharium"
   readonly property string configPath: configDir + "/config.json"
   readonly property string launcherPath: pluginDir + "/scripts/launch-aquarium"
@@ -165,11 +183,13 @@ Item {
     var next = clone(config)
     next.backdrop[key] = value
     config = normalise(next)
+    backdropPreviewPending = true
     persist()
   }
 
   function selectBackdropImage() {
     if (!pluginDir || backdropPicker.running) return
+    backdropPickerSelected = false
     statusLine = "OPENING OMARCHY IMAGE PICKER..."
     backdropPicker.command = [selectorPath, config.backdrop.imagePath]
     backdropPicker.running = true
@@ -180,7 +200,33 @@ Item {
     next.backdrop.imagePath = ""
     if (next.backdrop.source === "image") next.backdrop.source = "plain"
     config = normalise(next)
+    backdropPreviewPending = true
     persist()
+  }
+
+  function refreshBackdropPreview() {
+    if (!pluginDir) return
+    if (config.backdrop.source !== "image" || !config.backdrop.imagePath) {
+      backdropPreview.running = false
+      backdropPreviewDirty = false
+      backdropPreviewPath = ""
+      backdropPreviewError = ""
+      return
+    }
+    if (backdropPreview.running) {
+      backdropPreviewPath = ""
+      backdropPreviewError = ""
+      backdropPreviewDirty = true
+      return
+    }
+    backdropPreviewPath = ""
+    backdropPreviewError = ""
+    backdropPreviewHandled = false
+    backdropPreview.command = [
+      "python3", pluginDir + "/scripts/aquarium.py",
+      "--config", configPath, "--check-backdrop", "--json",
+    ]
+    backdropPreview.running = true
   }
 
   function changeSound(key, value) {
@@ -200,6 +246,7 @@ Item {
   function restoreDefaults() {
     config = clone(defaults)
     statusLine = "DEFAULT REEF RESTORED"
+    backdropPreviewPending = true
     persist()
   }
 
@@ -270,19 +317,53 @@ Item {
       onStreamFinished: {
         var selected = String(text || "").replace(/\n+$/, "")
         if (!selected) return
+        root.backdropPickerSelected = true
         var next = root.clone(root.config)
         next.backdrop.imagePath = selected
         next.backdrop.source = "image"
         root.config = root.normalise(next)
+        root.backdropPreviewPending = true
         root.persist()
       }
     }
     onExited: function(exitCode) {
-      root.statusLine = exitCode === 0
-        ? "CUSTOM BACKDROP SYNCHRONIZED"
-        : "IMAGE PICKER CLOSED WITHOUT A SELECTION"
+      if (!root.backdropPickerSelected)
+        root.statusLine = "IMAGE PICKER CLOSED WITHOUT A SELECTION"
     }
   }
+
+  Process {
+    id: backdropPreview
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.backdropPreviewHandled = true
+        if (root.backdropPreviewPending || root.backdropPreviewDirty || root.config.backdrop.source !== "image") return
+        var parsed = null
+        try { parsed = JSON.parse(String(text || "")) } catch (error) { parsed = null }
+        if (parsed && parsed.ok && typeof parsed.path === "string" && parsed.path) {
+          root.backdropPreviewPath = parsed.path
+          root.backdropPreviewError = ""
+        } else {
+          root.backdropPreviewPath = ""
+          root.backdropPreviewError = (parsed && typeof parsed.error === "string" && parsed.error)
+            ? parsed.error
+            : "custom image preview unavailable"
+        }
+      }
+    }
+    onExited: function(exitCode) {
+      if (root.backdropPreviewPending) return
+      if (root.backdropPreviewDirty) {
+        root.backdropPreviewDirty = false
+        root.refreshBackdropPreview()
+      } else if (!root.backdropPreviewHandled && root.config.backdrop.source === "image") {
+        root.backdropPreviewPath = ""
+        root.backdropPreviewError = "custom image preview unavailable"
+      }
+    }
+  }
+
 
 
   FileView {
@@ -317,6 +398,23 @@ Item {
     path: root.configPath
     watchChanges: false
     atomicWrites: true
+    onSaved: {
+      if (root.backdropPreviewPending) {
+        root.backdropPreviewPending = false
+        root.refreshBackdropPreview()
+      }
+    }
+    onSaveFailed: {
+      if (root.backdropPreviewPending) {
+        root.backdropPreviewPending = false
+        root.backdropPreviewDirty = false
+        root.backdropPreviewHandled = true
+        backdropPreview.running = false
+        root.backdropPreviewPath = ""
+        root.backdropPreviewError = "configuration save failed"
+      }
+      root.statusLine = "CONFIGURATION SAVE FAILED"
+    }
     printErrors: false
     onLoaded: {
       try {
@@ -326,10 +424,12 @@ Item {
         root.config = root.clone(root.defaults)
         root.statusLine = "INVALID CONFIGURATION · SAFE DEFAULTS ACTIVE"
       }
+      root.refreshBackdropPreview()
     }
     onLoadFailed: {
       root.config = root.clone(root.defaults)
       root.statusLine = "NEW HABITAT · DEFAULT PARAMETERS ACTIVE"
+      root.refreshBackdropPreview()
     }
   }
 
@@ -542,6 +642,7 @@ Item {
             Text {
               anchors { right: parent.right; rightMargin: 18; top: parent.top; topMargin: 14 }
               text: "LIVE BIOSPHERE PREVIEW\nANSI TRUECOLOR · 24 FPS"
+              visible: root.config.art.showTelemetry
               horizontalAlignment: Text.AlignRight
               color: "#678e99"
               font.family: root.fontFamily
@@ -823,16 +924,31 @@ Item {
               clip: true
               Image {
                 anchors.fill: parent
-                source: root.config.backdrop.imagePath ? "file://" + root.config.backdrop.imagePath : ""
+                source: root.config.backdrop.source === "image" && root.backdropPreviewPath
+                  ? root.toFileUrl(root.backdropPreviewPath) : ""
                 sourceSize.width: 352
                 sourceSize.height: 184
                 fillMode: Image.PreserveAspectCrop
-                visible: root.config.backdrop.imagePath !== ""
+                visible: root.backdropPreviewPath !== ""
                 asynchronous: true
                 cache: false
               }
               Rectangle { anchors.fill: parent; color: "#59000000"; visible: root.config.backdrop.imagePath !== "" }
-              Text { anchors.centerIn: parent; width: parent.width - 18; text: root.config.backdrop.imagePath ? "SELECTED IMAGE" : "NO IMAGE SELECTED"; color: "#b8d4d8"; font.family: root.fontFamily; font.pixelSize: 10; font.bold: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap }
+              Text {
+                anchors.centerIn: parent
+                width: parent.width - 18
+                text: root.config.backdrop.imagePath === ""
+                  ? "NO IMAGE SELECTED"
+                  : (root.backdropPreviewPath !== ""
+                      ? "SELECTED IMAGE"
+                      : (root.backdropPreviewError !== "" ? root.backdropPreviewError.toUpperCase() : "PREPARING PREVIEW..."))
+                color: "#b8d4d8"
+                font.family: root.fontFamily
+                font.pixelSize: 10
+                font.bold: true
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+              }
             }
 
             Rectangle {
@@ -840,6 +956,7 @@ Item {
               width: 118; height: 36; radius: 7
               color: backdropPicker.running ? "#335ce6df" : "#1cffffff"
               border.width: 1; border.color: "#47778a92"
+              Text { anchors.centerIn: parent; text: backdropPicker.running ? "OPENING..." : "SELECT IMAGE"; color: "#b6d0d5"; font.family: root.fontFamily; font.pixelSize: 10; font.bold: true }
               MouseArea { anchors.fill: parent; enabled: !backdropPicker.running; onClicked: root.selectBackdropImage() }
             }
             Rectangle {

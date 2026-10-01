@@ -31,7 +31,7 @@ flowchart LR
 
 ## Control room and persistence
 
-`Config.qml` reads packaged defaults and the species catalog, normalizes user input, and atomically writes JSON under `~/.config/omarcharium/`. Every mutation creates a fresh QML object before assignment; this avoids silent change-notification loss from mutating nested `var` objects in place.
+`Config.qml` reads packaged defaults and the species catalog, normalizes user input, and atomically writes JSON under `~/.config/omarcharium/`. Every mutation creates a fresh QML object before assignment; this avoids silent change-notification loss from mutating nested `var` objects in place. Its image preview loads only the renderer's bounded cached PNG, never the original selected file.
 
 The Python renderer independently normalizes the same public configuration contract. A malformed or partially written user file therefore falls back safely without preventing the screensaver from opening.
 
@@ -47,7 +47,7 @@ The Python renderer independently normalizes the same public configuration contr
 
 Backdrop effects are independent from the source so the same bounded terminal-native treatment can compose over built-in and user-selected sources. Each frame then advances positions from monotonic time, wraps entities at scene boundaries, paints into a cell buffer, emits ANSI truecolor only when the active foreground color changes, and erases the unpainted remainder of every row.
 
-For **Custom Image**, `RasterBackdrop` canonicalizes and size-checks a local allowlisted image, forces ImageMagick to the matching JPEG, PNG, GIF, BMP, or WebP decoder, and preprocesses it once with memory, map, disk, pixel, and timeout bounds. A global no-follow cache lock serializes conversion. The cache key includes the canonical path, size, modification time, fit, and dimming; mode-`0600` outputs are pruned to 16 files and 128 MiB. Ghostty and Kitty receive the resulting PNG through a negative-z Kitty graphics placement; resize sends a new placement without decoding again. Alacritty and Foot retain the terminal-native layers and show a plain-depth fallback notice.
+For **Custom Image**, `RasterBackdrop` canonicalizes a local allowlisted image, opens it once, and copies at most 32 MiB into a private snapshot. ImageMagick identifies and converts those same pinned bytes under memory, map, disk, 24-megapixel, and timeout bounds. A global no-follow cache lock serializes conversion. The cache key includes the snapshot's content hash, fit, and dimming; mode-`0600` outputs are pruned to 16 files and 128 MiB. The control-room preview reads the same bounded cached PNG after the configuration save completes. Ghostty and Kitty receive it through a negative-z Kitty graphics placement; resize sends a new placement without decoding again. Alacritty and Foot retain terminal-native layers and show a plain-depth fallback notice when the status display is enabled.
 
 Sprites contain only single-cell glyphs. A mirror translation reverses direction without maintaining duplicate left-facing art. `--seed` makes snapshots deterministic for tests and visual debugging.
 The terminal enters an alternate screen, hides the cursor, and enables SGR any-motion mouse reporting. A bounded input decoder distinguishes pointer motion from clicks and keyboard bytes, including fragmented reports. Cleanup restores every terminal mode on normal exit or signal. Accepted dismissal input closes all monitor instances through the standard Omarchy screensaver class.
@@ -64,7 +64,7 @@ The terminal enters an alternate screen, hides the cursor, and enables SGR any-m
 
 The first-party idle service still owns locking. Omarcharium uses the same configured screensaver timeout and standard window class, so Omarchy observes active screensaver windows and preserves the configured lock deadline.
 
-To suppress only the stock visualizer, `scripts/idle-integration` creates the existing `screensaver-off` toggle when absent and records ownership separately. It never claims an existing toggle and removes only owned state.
+To suppress only the stock visualizer, `scripts/idle-integration` creates Omarchy's `screensaver-off` toggle when absent and records ownership separately. It reconciles a stale ownership record only when the toggle is absent, never claims an existing foreign toggle, and removes only matching owned state. Omarchy's toggle and Keep Awake paths live under `$HOME/.local/state` even when `XDG_STATE_HOME` differs. Automatic immersion is armed only after owned suppression is confirmed; a user-owned toggle disables automatic immersion, while manual launch remains available.
 
 ## Audio
 
@@ -76,8 +76,8 @@ The synthesis provides independently toggled continuous water motion and sparse 
 |---|---|
 | Plugin source | Read-only at runtime |
 | `~/.config/omarcharium/config.json` | Atomic user configuration read/write; directory mode `0700`; renderer input capped at 256 KiB |
-| Selected backdrop image | Local read-only allowlisted input; 32 MiB and 24 megapixel limits |
-| `~/.cache/omarcharium/` | Private derived backdrop PNGs, global no-follow cache lock, 16-file/128 MiB ceiling |
+| Selected backdrop image | Local read-only allowlisted input; copied into a private bounded snapshot before identifying or converting; 32 MiB and 24 megapixel limits |
+| `~/.cache/omarcharium/` | Private derived backdrop PNGs for both renderer and control-room preview, global no-follow cache lock, 16-file/128 MiB ceiling |
 | `~/.local/state/omarcharium/` | Private matched toggle ownership marker |
 | `$XDG_RUNTIME_DIR/omarcharium/audio.lock` | Private no-follow ephemeral audio leadership lock |
 | `/usr/share/omarchy/` | Read-only terminal defaults; never modified |

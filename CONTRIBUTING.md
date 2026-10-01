@@ -16,19 +16,20 @@ bash -n scripts/launch-aquarium scripts/idle-integration scripts/select-backdrop
 
 For a live development copy:
 
+Stage newly added runtime files before this sync; untracked files are intentionally excluded. The explicit payload omits checkout metadata, tests, documentation, and developer-only files. Extend the path list when adding new runtime files:
+
 ```sh
 PLUGIN_ID=dailen.omarcharium
 PLUGIN_DIR="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 mkdir -p "$PLUGIN_DIR"
-cp -a --no-preserve=ownership ./. "$PLUGIN_DIR/"
+git ls-files -z -- manifest.json Service.qml Config.qml defaults.json species.json assets/ scripts/ \
+  | tar --create --file=- --null --verbatim-files-from --files-from=- \
+  | tar --extract --file=- --directory="$PLUGIN_DIR"
 omarchy plugin enable "$PLUGIN_ID"
+omarchy restart shell
 ```
 
-Files under the user plugin directory hot-reload. Force discovery only when necessary:
-
-```sh
-omarchy-shell shell rescanPlugins
-```
+User plugin files usually hot-reload, but an already instantiated control-room overlay can retain its previous QML across a rescan. Restart the shell after copying runtime files before judging UI behavior.
 
 ## Change guidelines
 

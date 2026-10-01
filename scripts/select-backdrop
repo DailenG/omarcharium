@@ -2,10 +2,10 @@
 set -euo pipefail
 
 selected=${1:-}
-selection_file=$(mktemp --tmpdir omarcharium-selection.XXXXXX)
-done_file=$(mktemp --tmpdir omarcharium-selection-done.XXXXXX)
-rm -f "$done_file"
-trap 'rm -f "$selection_file" "$done_file"' EXIT
+selection_dir=$(mktemp -d --tmpdir omarcharium-selection.XXXXXX)
+selection_file=$(mktemp --tmpdir="$selection_dir" selection.XXXXXX)
+done_file="$selection_dir/done"
+trap 'rm -f -- "$selection_file" "$done_file"; rmdir -- "$selection_dir"' EXIT
 
 image_dirs=$(printf '%s\n%s\n%s' "$HOME/Pictures" "$HOME/Downloads" "$HOME")
 omarchy-shell image-selector open "$image_dirs" "" "$selected" "$selection_file" "$done_file" true true >/dev/null

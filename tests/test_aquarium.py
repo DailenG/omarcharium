@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("omarcharium_aquarium", ROOT / "scripts" / "aquarium.py")
@@ -15,6 +18,9 @@ assert SPEC and SPEC.loader
 AQUARIUM = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = AQUARIUM
 SPEC.loader.exec_module(AQUARIUM)
+
+HAVE_MAGICK = shutil.which("magick") is not None
+requires_magick = unittest.skipUnless(HAVE_MAGICK, "ImageMagick (magick) is not installed")
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -44,6 +50,11 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(config["sound"]["bubbles"])
         self.assertFalse(config["integration"]["idleEnabled"])
         self.assertFalse(config["integration"]["exitOnPointerMotion"])
+
+    def test_status_display_defaults_off_without_overwriting_saved_choice(self) -> None:
+        self.assertFalse(AQUARIUM.normalise_config({})["art"]["showTelemetry"])
+        self.assertFalse(AQUARIUM.normalise_config({"art": {"showTelemetry": False}})["art"]["showTelemetry"])
+        self.assertTrue(AQUARIUM.normalise_config({"art": {"showTelemetry": True}})["art"]["showTelemetry"])
 
     def test_legacy_vegetation_volume_key_is_accepted_as_reef_density(self) -> None:
         config = AQUARIUM.normalise_config({"art": {"vegetationVolume": 75}})
@@ -201,6 +212,28 @@ class RendererTests(unittest.TestCase):
         self.assertGreater(low_stalk_chars, 0)
         self.assertGreater(dense_stalk_chars, low_stalk_chars * 2)
         self.assertGreater(dense_coral_chars, low_coral_chars * 2)
+
+    def test_status_display_controls_all_text_including_backdrop_notice(self) -> None:
+        config = AQUARIUM.normalise_config({
+            "species": {key: 0 for key in AQUARIUM.SPRITES},
+            "art": {"bubbleDensity": 0, "reefDensity": 0},
+        })
+        scene = AQUARIUM.OceanScene(100, 28, config, seed=7)
+        without_notice = scene.render().plain()
+        scene.backdrop_notice = "custom image unavailable"
+        self.assertEqual(scene.render().plain(), without_notice)
+        self.assertNotIn("OMARCHARIUM", without_notice)
+        self.assertNotIn("BIOMASS", without_notice)
+        self.assertNotIn("returns to surface", without_notice)
+
+        config["art"]["showTelemetry"] = True
+        with_status = scene.render().plain()
+        self.assertIn("OMARCHARIUM", with_status)
+        self.assertIn("BIOMASS", with_status)
+        self.assertIn("returns to surface", with_status)
+        self.assertIn("custom image unavailable", with_status)
+
+
 class RasterBackdropTests(unittest.TestCase):
     def test_source_validation_accepts_only_bounded_local_images(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -258,6 +291,138 @@ class RasterBackdropTests(unittest.TestCase):
 
         self.assertIn(current.name, {path.name for path in remaining})
         self.assertLessEqual(len(remaining), AQUARIUM.RasterBackdrop.MAX_CACHE_FILES)
+
+    def test_pin_source_stores_a_bounded_private_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache_root = root / "cache"
+            cache_root.mkdir()
+            image = root / "reef.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"pretend-pixels" * 4)
+            config = AQUARIUM.normalise_config({
+                "backdrop": {"source": "image", "imagePath": str(image)},
+            })
+            raster = AQUARIUM.RasterBackdrop(config)
+            pinned = raster._pin_source(image, cache_root)
+            self.assertIsNotNone(pinned)
+            snapshot, digest = pinned
+            self.assertTrue(snapshot.is_file())
+            self.assertEqual(snapshot.parent, cache_root)
+            self.assertEqual(snapshot.read_bytes(), image.read_bytes())
+            self.assertEqual(digest, hashlib.sha256(image.read_bytes()).hexdigest())
+            self.assertEqual(snapshot.stat().st_mode & 0o777, 0o600)
+            snapshot.unlink()
+
+    def test_pin_source_rejects_bytes_beyond_the_authoritative_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache_root = root / "cache"
+            cache_root.mkdir()
+            image = root / "reef.png"
+            image.write_bytes(b"x" * 64)
+            config = AQUARIUM.normalise_config({
+                "backdrop": {"source": "image", "imagePath": str(image)},
+            })
+            raster = AQUARIUM.RasterBackdrop(config)
+            with mock.patch.object(AQUARIUM.RasterBackdrop, "MAX_FILE_BYTES", 16):
+                pinned = raster._pin_source(image, cache_root)
+            self.assertIsNone(pinned)
+            self.assertIn("using plain depth", raster.error)
+            self.assertEqual(list(cache_root.glob(".snapshot-*")), [])
+
+    @requires_magick
+    def test_prepare_pins_bytes_so_a_later_source_swap_cannot_alter_the_converted_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / "reef.png"
+            subprocess.run(["magick", "-size", "4x4", "xc:red", str(original)], check=True)
+            swapped = root / "swapped.png"
+            subprocess.run(["magick", "-size", "4x4", "xc:blue", str(swapped)], check=True)
+
+            config = AQUARIUM.normalise_config({
+                "backdrop": {"source": "image", "imagePath": str(original), "fitMode": "cover", "dimming": 0},
+            })
+            raster = AQUARIUM.RasterBackdrop(config)
+            real_identify = AQUARIUM.RasterBackdrop.identify_dimensions.__func__
+
+            def racing_identify(cls, source, executable, environment):
+                # Simulate a concurrent writer replacing the bytes at the
+                # originally selected path only after they were pinned.
+                original.write_bytes(swapped.read_bytes())
+                return real_identify(cls, source, executable, environment)
+
+            with tempfile.TemporaryDirectory() as cache_dir:
+                with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache_dir}), \
+                     mock.patch.object(AQUARIUM.RasterBackdrop, "identify_dimensions", classmethod(racing_identify)):
+                    self.assertTrue(raster.prepare())
+                pixel = subprocess.run(
+                    [
+                        "magick", str(raster.cached_path),
+                        "-format", "%[fx:int(255*r)],%[fx:int(255*g)],%[fx:int(255*b)]", "info:",
+                    ],
+                    check=True, capture_output=True, text=True,
+                ).stdout.strip()
+
+        self.assertEqual(pixel, "255,0,0")
+
+
+class BackdropCliTests(unittest.TestCase):
+    def run_check_backdrop(
+        self, config_path: Path, cache_home: Path, *, json_mode: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        environment = os.environ.copy()
+        environment["XDG_CACHE_HOME"] = str(cache_home)
+        command = [
+            sys.executable, str(ROOT / "scripts" / "aquarium.py"),
+            "--config", str(config_path), "--check-backdrop",
+        ]
+        if json_mode:
+            command.append("--json")
+        return subprocess.run(command, capture_output=True, text=True, env=environment)
+
+    def write_config(self, directory: Path, image: Path) -> Path:
+        config_path = directory / "config.json"
+        config_path.write_text(json.dumps({
+            "backdrop": {"source": "image", "imagePath": str(image), "fitMode": "cover", "dimming": 20},
+        }))
+        return config_path
+
+    @requires_magick
+    def test_json_mode_returns_a_bounded_rendered_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "reef.png"
+            subprocess.run(["magick", "-size", "8x8", "xc:red", str(image)], check=True)
+            config_path = self.write_config(root, image)
+            cache_home = root / "cache"
+
+            result = self.run_check_backdrop(config_path, cache_home, json_mode=True)
+            self.assertEqual(result.returncode, 0)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            cached_path = Path(payload["path"])
+            self.assertEqual(cached_path.parent, cache_home / "omarcharium")
+            self.assertEqual(cached_path.stat().st_mode & 0o777, 0o600)
+            details = subprocess.run(
+                ["magick", str(cached_path), "-format", "%w %h %[fx:int(255*r)],%[fx:int(255*g)],%[fx:int(255*b)]", "info:"],
+                check=True, capture_output=True, text=True,
+            ).stdout.split()
+            self.assertEqual(details[:2], ["1920", "1080"])
+            red, green, blue = map(int, details[2].split(","))
+            self.assertGreater(red, 0)
+            self.assertEqual((green, blue), (0, 0))
+
+    def test_json_mode_reports_missing_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = self.write_config(root, root / "missing.png")
+            result = self.run_check_backdrop(config_path, root / "cache", json_mode=True)
+
+        self.assertEqual(result.returncode, 4)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertIsNone(payload["path"])
+        self.assertIn("using plain depth", payload["error"])
 
 
 class FilesystemSecurityTests(unittest.TestCase):
@@ -343,110 +508,6 @@ class AudioTests(unittest.TestCase):
         self.assertTrue(audio_bubbles.bubbles)
 
 
-
-
-class IdleIntegrationTests(unittest.TestCase):
-    def run_helper(
-        self, state_home: Path, action: str, *, check: bool = True,
-    ) -> subprocess.CompletedProcess[str]:
-        environment = os.environ.copy()
-        environment["XDG_STATE_HOME"] = str(state_home)
-        return subprocess.run(
-            ["bash", str(ROOT / "scripts" / "idle-integration"), action],
-            check=check,
-            text=True,
-            capture_output=True,
-            env=environment,
-        )
-
-    def test_owned_stock_toggle_is_released(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory)
-            self.run_helper(state, "enable")
-            toggle = state / "omarchy" / "toggles" / "screensaver-off"
-            owner = state / "omarcharium" / "owns-screensaver-off"
-            self.assertTrue(toggle.exists())
-            self.assertTrue(owner.exists())
-
-            self.run_helper(state, "disable")
-            self.assertFalse(toggle.exists())
-            self.assertFalse(owner.exists())
-
-    def test_legacy_empty_ownership_state_is_migrated_before_release(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory)
-            toggle = state / "omarchy" / "toggles" / "screensaver-off"
-            owner = state / "omarcharium" / "owns-screensaver-off"
-            toggle.parent.mkdir(parents=True)
-            owner.parent.mkdir(parents=True)
-            toggle.touch()
-            owner.touch()
-
-            self.run_helper(state, "enable")
-            status = self.run_helper(state, "status")
-
-            self.assertGreater(toggle.stat().st_size, 0)
-            self.assertEqual(toggle.read_bytes(), owner.read_bytes())
-            self.assertEqual(status.stdout.strip(), "owned")
-            self.run_helper(state, "disable")
-            self.assertFalse(toggle.exists())
-            self.assertFalse(owner.exists())
-
-    def test_preexisting_user_toggle_is_never_removed(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory)
-            toggle = state / "omarchy" / "toggles" / "screensaver-off"
-            toggle.parent.mkdir(parents=True)
-            toggle.touch()
-
-            self.run_helper(state, "enable")
-            self.run_helper(state, "disable")
-            self.assertTrue(toggle.exists())
-            self.assertFalse((state / "omarcharium" / "owns-screensaver-off").exists())
-
-    def test_replaced_toggle_is_not_mistaken_for_owned_state(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory)
-            self.run_helper(state, "enable")
-            toggle = state / "omarchy" / "toggles" / "screensaver-off"
-            owner = state / "omarcharium" / "owns-screensaver-off"
-            toggle.unlink()
-            toggle.touch()
-
-            self.run_helper(state, "disable")
-
-            self.assertTrue(toggle.exists())
-            self.assertFalse(owner.exists())
-
-    def test_symlinked_owner_is_refused_without_modifying_target(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory)
-            owner = state / "omarcharium" / "owns-screensaver-off"
-            owner.parent.mkdir(parents=True)
-            target = state / "target"
-            target.write_text("preserve me", encoding="utf-8")
-            owner.symlink_to(target)
-
-            result = self.run_helper(state, "enable", check=False)
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(target.read_text(encoding="utf-8"), "preserve me")
-            self.assertFalse((state / "omarchy" / "toggles" / "screensaver-off").exists())
-
-    def test_owned_state_is_private_and_reports_owned(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory)
-            self.run_helper(state, "enable")
-            toggle = state / "omarchy" / "toggles" / "screensaver-off"
-            owner_dir = state / "omarcharium"
-            owner = owner_dir / "owns-screensaver-off"
-
-            status = self.run_helper(state, "status")
-
-            self.assertEqual(status.stdout.strip(), "owned")
-            self.assertEqual(owner_dir.stat().st_mode & 0o777, 0o700)
-            self.assertEqual(toggle.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(owner.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

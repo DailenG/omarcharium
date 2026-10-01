@@ -3,14 +3,51 @@ set -euo pipefail
 
 plugin_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 renderer="$plugin_dir/scripts/aquarium.py"
+integration_helper="$plugin_dir/scripts/idle-integration"
 
 # Omarchy's idle service identifies screensavers through this application id.
-if pgrep -f '[o]rg.omarchy.screensaver' >/dev/null; then
+mode=${1:-}
+
+# Omarchy's first-party idle service and toggle store hardcode this path
+# regardless of XDG_STATE_HOME; match it exactly so this check observes the
+# same state Omarchy itself does.
+stay_awake_state="$HOME/.local/state/omarchy/indicators/stay-awake"
+current_uid=$(id -u)
+
+screensaver_process_running() {
+  # Scope to the invoking user: an unscoped `pgrep -f` would also match a
+  # different local user's process that merely contains this application id
+  # in its own command line, letting them silently suppress our launches.
+  pgrep -u "$current_uid" -f '[o]rg.omarchy.screensaver' >/dev/null 2>&1
+}
+
+screensaver_window_open() {
+  # hyprctl only ever talks to the invoking user's own compositor instance,
+  # so this check is inherently scoped to the current session.
+  command -v hyprctl >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  hyprctl clients -j 2>/dev/null | jq -e 'any(.[]?; .class == "org.omarchy.screensaver")' >/dev/null 2>&1
+}
+
+if screensaver_process_running || screensaver_window_open; then
   exit 0
 fi
 
-if [[ ${1:-} != force ]] && omarchy-toggle-enabled screensaver-off; then
-  exit 1
+if [[ $mode != force ]]; then
+  # The QML service watches this state too. Check again here so a delayed
+  # file watcher cannot start automatic immersion after the user selects
+  # Keep Awake. Keep Awake only suppresses automatic immersion.
+  if [[ $mode == automatic && -f $stay_awake_state ]]; then
+    exit 0
+  fi
+  # A screensaver-off toggle Omarcharium does not own means the user (or
+  # another tool) explicitly disabled the stock saver; respect that for
+  # anything but a manual, forced launch. Automatic launches additionally
+  # require owned suppression, or they could overlap the stock saver.
+  status=$(bash "$integration_helper" status 2>/dev/null) || status=user-disabled
+  if [[ $status == user-disabled || ( $mode == automatic && $status != owned ) ]]; then
+    exit 0
+  fi
 fi
 
 terminal=$(xdg-terminal-exec --print-id)

@@ -27,15 +27,15 @@ Omarcharium is an unsandboxed Omarchy shell plugin and runs with the current use
 - no secrets or credentials read, stored, or transmitted;
 - no writes to `/usr/share/omarchy/`;
 - configuration only under a mode `0700` `~/.config/omarcharium/`, with renderer input capped at 256 KiB;
-- selected backdrop images are local read-only inputs, limited to 32 MiB, 24 megapixels, and an explicit JPEG, PNG, GIF, BMP, or WebP decoder;
+- selected backdrop images are local read-only inputs, copied at most 32 MiB into a private snapshot before bounded 24-megapixel decoding with an explicit JPEG, PNG, GIF, BMP, or WebP decoder; the QML preview loads only the derived PNG;
 - derived backdrop PNGs are mode `0600`, limited to 16 files and 128 MiB under a mode `0700` `~/.cache/omarcharium/`;
-- owned integration state only under a mode `0700` `~/.local/state/omarcharium/`;
-- no-follow mode `0600` lock files under `$XDG_RUNTIME_DIR/omarcharium/`, with a private cache fallback when the runtime directory is unavailable;
+- owned integration state only under a mode `0700` `~/.local/state/omarcharium/`, matching Omarchy's `$HOME/.local/state` toggle location;
+- a no-follow mode `0600` audio lock under `$XDG_RUNTIME_DIR/omarcharium/`, with a private cache fallback when the runtime directory is unavailable;
 - external processes limited to documented Omarchy, Hyprland, terminal, PipeWire, ImageMagick, and POSIX tools.
 
-The idle helper writes the same unique ownership marker to the stock `screensaver-off` toggle and its private ownership record. Disable removes the toggle only while both regular files still match. Pre-existing, replaced, mismatched, or symlinked state is preserved or rejected.
+The idle helper serializes ownership changes and writes the same unique marker to the stock `screensaver-off` toggle and its private ownership record. A stale ownership record is reclaimed only when no toggle exists. Automatic immersion is armed only after ownership is confirmed; pre-existing or replaced user toggles suppress it. Disable removes the toggle only while both regular files still match.
 
-Backdrop paths are passed as direct process arguments, never interpolated into shell command strings. Remote URLs and unsupported file types are rejected. ImageMagick is forced to the decoder selected by the validated suffix and runs with explicit memory, map, disk, dimension, and wall-clock bounds. Temporary and cached files use exclusive creation, ownership checks, no-follow locks, and private permissions.
+Backdrop paths are passed as direct process arguments, never interpolated into shell command strings. Selection/completion paths live under a per-invocation private temporary directory. ImageMagick is forced to the decoder selected by the validated suffix and uses pinned, bounded source bytes with explicit memory, map, disk, dimension, and wall-clock limits. The shell preview loads only the bounded derived PNG. Temporary and cached files use exclusive creation, ownership checks, no-follow locks, and private permissions.
 
 The shell IPC endpoint is intentionally available to processes in the same user session. It starts, stops, or configures the screensaver and is not an authentication boundary. The fixed **Report Bug** link is the only runtime action that opens a network-capable application, and it occurs only after explicit user interaction.
 

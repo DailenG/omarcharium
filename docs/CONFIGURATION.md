@@ -24,10 +24,10 @@ Each species has an independent exact population. Setting a species to zero remo
 | Palette | Lagoon, Midnight, Coral, Phosphor | Lagoon | Complete habitat color system |
 | Bubble density | 0–100% | 55% | Number of animated bubble entities |
 | Current | 0.35–1.8× | 1.0× | Horizontal fish velocity multiplier |
-| Status display | On/off | On | Header, biomass, palette, and dismissal footer; rendered locally |
+| Status display | On/off | Off | Header, biomass, palette, dismissal footer, and backdrop notices; rendered locally |
 | Reef density | 0–100% | 50% | Height, branch tiers, and density of coral formations, kelp stalks, and sea flora |
 
-The JSON key remains `showTelemetry` for configuration compatibility. It only toggles this local status display; Omarcharium does not collect or transmit usage data.
+The JSON key remains `showTelemetry` for configuration compatibility. It is off by default for a text-free reef; turn on **show status display** in the control room to see status and backdrop notices. Existing saved on/off choices are preserved. Omarcharium does not collect or transmit usage data.
 
 ## Backdrop layers
 
@@ -42,7 +42,7 @@ The JSON key remains `showTelemetry` for configuration compatibility. It only to
 
 The background source and effects are independent. Pelagic effects can run over Plain Depth, Pelagic Field, or a custom image.
 
-**Custom Image** uses Omarchy's fullscreen image picker. The renderer accepts local files only, limits inputs to 32 MiB and 24 megapixels, and forces ImageMagick to the decoder allowlisted for the selected suffix. Preprocessing runs with bounded memory, map, disk, and wall-clock resources in a private temporary directory. Derived mode-`0600` PNGs are cached under `~/.cache/omarcharium/`, with pruning at 16 files or 128 MiB. Ghostty and Kitty receive the cached PNG through the Kitty graphics protocol at negative z-order. Alacritty and Foot display a clear plain-depth fallback while preserving habitat, fish, the status display, and optional effects.
+**Custom Image** uses Omarchy's fullscreen image picker. Selection and completion files stay inside a private temporary directory. The renderer accepts local files only, copies at most 32 MiB into a private snapshot, limits images to 24 megapixels, and forces ImageMagick to the decoder allowlisted for the selected suffix. Identification and conversion use the same pinned bytes with bounded memory, map, disk, and wall-clock resources. Derived mode-`0600` PNGs are cached under `~/.cache/omarcharium/`, with pruning at 16 files or 128 MiB. The control-room preview uses this bounded cached PNG, never the raw selected image. Ghostty and Kitty display the PNG at negative z-order. Alacritty and Foot use plain depth while preserving habitat, fish, and optional effects; fallback notices appear only when the status display is enabled.
 
 ## Ambience
 
@@ -64,9 +64,9 @@ python3 scripts/aquarium.py --audio-test 8
 The test does not require a TTY. It plays three rising tones and then the configured water texture and/or bubble chirps used by the screensaver. Audio follows the current PipeWire default sink.
 ## Idle integration
 
-**Automatic Idle Immersion** uses `idle.screensaver` from `~/.config/omarchy/shell.json`. Locking remains under Omarchy's first-party idle service and continues to use `idle.lock`.
+**Automatic Idle Immersion** follows `idle.screensaver` from `~/.config/omarchy/shell.json` and honors Omarchy's **Keep Awake** quick-bar setting. Omarchy stores Keep Awake and `screensaver-off` under `$HOME/.local/state/omarchy/` even when `XDG_STATE_HOME` differs. Locking remains under Omarchy's first-party idle service and continues to use `idle.lock`.
 
-Disable automatic immersion to keep tray and manual launching while restoring the stock visualizer behavior.
+Automatic immersion starts only after Omarcharium confirms it owns the toggle suppressing the stock visualizer. A pre-existing user-owned `screensaver-off` toggle suppresses automatic immersion instead; manual tray/IPC launching remains available. Keep Awake also suppresses only automatic immersion. Disable automatic immersion to restore the stock visualizer while retaining tray/manual controls.
 
 ## Surface control
 
@@ -91,7 +91,7 @@ Disable automatic immersion to keep tray and manual launching while restoring th
     "palette": "lagoon",
     "bubbleDensity": 55,
     "current": 1.0,
-    "showTelemetry": true,
+    "showTelemetry": false,
     "reefDensity": 50
   },
   "backdrop": {
@@ -125,6 +125,9 @@ python3 scripts/aquarium.py --snapshot --width 120 --height 36 --seed 7
 
 # Validate and cache the configured custom image
 python3 scripts/aquarium.py --check-backdrop
+
+# Machine-readable validation and cached preview path (for integrations)
+python3 scripts/aquarium.py --check-backdrop --json
 
 # Force or suppress audio for an interactive terminal run
 python3 scripts/aquarium.py --sound

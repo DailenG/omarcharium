@@ -196,7 +196,7 @@ def normalise_config(raw: Any) -> dict[str, Any]:
             "palette": palette,
             "bubbleDensity": int(clamp_number(art.get("bubbleDensity"), 0, 100, fallback_art.get("bubbleDensity", 55))),
             "current": round(clamp_number(art.get("current"), 0.35, 1.8, fallback_art.get("current", 1.0)), 2),
-            "showTelemetry": bool(art.get("showTelemetry", fallback_art.get("showTelemetry", True))),
+            "showTelemetry": bool(art.get("showTelemetry", fallback_art.get("showTelemetry", False))),
             "reefDensity": int(clamp_number(
                 (incoming.get("art", {}) if isinstance(incoming.get("art"), dict) else {}).get(
                     "reefDensity",
@@ -649,7 +649,7 @@ class OceanScene:
             canvas.text((self.width - len(footer)) // 2, self.height - 1, footer, palette["dim"])
 
     def _draw_backdrop_notice(self, canvas: FrameBuffer) -> None:
-        if not self.backdrop_notice:
+        if not self.config["art"]["showTelemetry"] or not self.backdrop_notice:
             return
         notice = f"[ {self.backdrop_notice} ]"
         canvas.text(max(1, (self.width - len(notice)) // 2), self.height - 2, notice[: self.width - 2], self.palette["coral"])
@@ -885,6 +885,58 @@ class RasterBackdrop:
             return False
         return stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid()
 
+    @staticmethod
+    def _bounded_copy_and_hash(handle: Any, destination_file: Any, size: int) -> str:
+        """Copy at most *size* bytes from *handle* into *destination_file*
+        while hashing them, so the amount read is bounded by the length we
+        already validated rather than by whatever the source grows to."""
+        digest = hashlib.sha256()
+        remaining = size
+        while remaining > 0:
+            chunk = handle.read(min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            destination_file.write(chunk)
+            digest.update(chunk)
+            remaining -= len(chunk)
+        return digest.hexdigest()
+
+    def _pin_source(self, source: Path, cache_root: Path) -> tuple[Path, str] | None:
+        """Open *source* exactly once and copy its bytes into a private
+        0600 file inside our own 0700 cache directory before any decoding
+        happens. Both the identify and convert steps operate on this
+        pinned snapshot, so a concurrent writer at *source* (the picker
+        scans shared, writable directories such as Downloads) cannot swap
+        the bytes between the size/pixel check and the eventual decode."""
+        try:
+            fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_CLOEXEC)
+        except OSError:
+            self.error = "custom image is missing or unreadable · using plain depth"
+            return None
+        snapshot_path: Path | None = None
+        try:
+            with os.fdopen(fd, "rb") as handle:
+                file_stat = os.fstat(handle.fileno())
+                if not stat.S_ISREG(file_stat.st_mode):
+                    self.error = "custom image type is unsupported · using plain depth"
+                    return None
+                if file_stat.st_size > self.MAX_FILE_BYTES:
+                    self.error = "custom image exceeds 32 MiB · using plain depth"
+                    return None
+                suffix = source.suffix.lower()
+                with tempfile.NamedTemporaryFile(
+                    dir=cache_root, prefix=".snapshot-", suffix=suffix, delete=False,
+                ) as snapshot_file:
+                    snapshot_path = Path(snapshot_file.name)
+                    content_hash = self._bounded_copy_and_hash(handle, snapshot_file, file_stat.st_size)
+            snapshot_path.chmod(0o600)
+            return snapshot_path, content_hash
+        except OSError:
+            self.error = "custom image snapshot failed · using plain depth"
+            if snapshot_path is not None:
+                snapshot_path.unlink(missing_ok=True)
+            return None
+
     @classmethod
     def identify_dimensions(
         cls, source: Path, executable: str, environment: dict[str, str],
@@ -941,66 +993,72 @@ class RasterBackdrop:
         except OSError:
             self.error = "custom image cache is unsafe · using plain depth"
             return False
-        environment = os.environ.copy()
-        environment["MAGICK_TEMPORARY_PATH"] = str(cache_root)
-        dimensions = self.identify_dimensions(source, executable, environment)
-        if dimensions is None:
-            self.error = "custom image could not be decoded or exceeds 24 megapixels · using plain depth"
+
+        pinned = self._pin_source(source, cache_root)
+        if pinned is None:
             return False
-
-        metadata = source.stat()
-        signature = "\0".join((
-            str(source), str(metadata.st_size), str(metadata.st_mtime_ns),
-            self.settings["fitMode"], str(self.settings["dimming"]),
-        ))
-        cache_key = hashlib.sha256(signature.encode("utf-8", "surrogateescape")).hexdigest()
-        output = cache_root / f"backdrop-{cache_key}.png"
-        lock_path = cache_root / "backdrop-cache.lock"
-        temporary: Path | None = None
-
+        snapshot, content_hash = pinned
         try:
-            with open_lock_file(lock_path) as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                output_exists = output.exists() or output.is_symlink()
-                if output_exists and not self._owned_regular_file(output):
-                    self.error = "custom image cache entry is unsafe · using plain depth"
-                    return False
-                if not output_exists:
-                    with tempfile.NamedTemporaryFile(
-                        dir=cache_root, prefix=f".{cache_key}.", suffix=".tmp", delete=False,
-                    ) as temporary_file:
-                        temporary = Path(temporary_file.name)
-                    fit_mode = self.settings["fitMode"]
-                    if fit_mode == "cover":
-                        fit_args = ["-resize", "1920x1080^", "-gravity", "center", "-extent", "1920x1080"]
-                    elif fit_mode == "contain":
-                        fit_args = ["-resize", "1920x1080", "-gravity", "center", "-extent", "1920x1080"]
-                    else:
-                        fit_args = ["-resize", "1920x1080>", "-gravity", "center", "-extent", "1920x1080"]
-                    brightness = (100 - self.settings["dimming"]) / 100
-                    converted = subprocess.run(
-                        [
-                            *self._magick_prefix(executable), self.image_spec(source), "-auto-orient",
-                            "-background", "black", *fit_args,
-                            "-alpha", "remove", "-evaluate", "multiply", f"{brightness:.2f}",
-                            "-strip", f"png:{temporary}",
-                        ],
-                        check=False, capture_output=True, timeout=30, env=environment,
-                    )
-                    if converted.returncode != 0 or not self._owned_regular_file(temporary):
-                        self.error = "custom image conversion failed · using plain depth"
+            environment = os.environ.copy()
+            environment["MAGICK_TEMPORARY_PATH"] = str(cache_root)
+            dimensions = self.identify_dimensions(snapshot, executable, environment)
+            if dimensions is None:
+                self.error = "custom image could not be decoded or exceeds 24 megapixels · using plain depth"
+                return False
+
+            signature = "\0".join((
+                content_hash, self.settings["fitMode"], str(self.settings["dimming"]),
+            ))
+            cache_key = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+            output = cache_root / f"backdrop-{cache_key}.png"
+            lock_path = cache_root / "backdrop-cache.lock"
+            temporary: Path | None = None
+
+            try:
+                with open_lock_file(lock_path) as lock_file:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                    output_exists = output.exists() or output.is_symlink()
+                    if output_exists and not self._owned_regular_file(output):
+                        self.error = "custom image cache entry is unsafe · using plain depth"
                         return False
-                    temporary.chmod(0o600)
-                    os.replace(temporary, output)
-                    temporary = None
-                output.chmod(0o600)
-                self.prune_cache(cache_root, output)
-        except (OSError, subprocess.TimeoutExpired):
-            self.error = "custom image cache failed · using plain depth"
-            return False
+                    if not output_exists:
+                        with tempfile.NamedTemporaryFile(
+                            dir=cache_root, prefix=f".{cache_key}.", suffix=".tmp", delete=False,
+                        ) as temporary_file:
+                            temporary = Path(temporary_file.name)
+                        fit_mode = self.settings["fitMode"]
+                        if fit_mode == "cover":
+                            fit_args = ["-resize", "1920x1080^", "-gravity", "center", "-extent", "1920x1080"]
+                        elif fit_mode == "contain":
+                            fit_args = ["-resize", "1920x1080", "-gravity", "center", "-extent", "1920x1080"]
+                        else:
+                            fit_args = ["-resize", "1920x1080>", "-gravity", "center", "-extent", "1920x1080"]
+                        brightness = (100 - self.settings["dimming"]) / 100
+                        converted = subprocess.run(
+                            [
+                                *self._magick_prefix(executable), self.image_spec(snapshot), "-auto-orient",
+                                "-background", "black", *fit_args,
+                                "-alpha", "remove", "-evaluate", "multiply", f"{brightness:.2f}",
+                                "-strip", f"png:{temporary}",
+                            ],
+                            check=False, capture_output=True, timeout=30, env=environment,
+                        )
+                        if converted.returncode != 0 or not self._owned_regular_file(temporary):
+                            self.error = "custom image conversion failed · using plain depth"
+                            return False
+                        temporary.chmod(0o600)
+                        os.replace(temporary, output)
+                        temporary = None
+                    output.chmod(0o600)
+                    self.prune_cache(cache_root, output)
+            except (OSError, subprocess.TimeoutExpired):
+                self.error = "custom image cache failed · using plain depth"
+                return False
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
         finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+            snapshot.unlink(missing_ok=True)
 
         self.cached_path = output
         self.error = ""
@@ -1267,6 +1325,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--check-config", action="store_true", help="print the normalised configuration and exit")
     parser.add_argument("--check-backdrop", action="store_true", help="validate and prepare the configured custom image")
     parser.add_argument(
+        "--json", action="store_true",
+        help="with --check-backdrop, emit a single-line JSON object instead of human-readable text",
+    )
+    parser.add_argument(
         "--audio-test", type=float, nargs="?", const=8.0, default=None, metavar="SECONDS",
         help="play an audible PipeWire diagnostic without requiring a terminal",
     )
@@ -1284,7 +1346,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.check_backdrop:
         raster = RasterBackdrop(config)
-        if not raster.prepare():
+        ok = raster.prepare()
+        if args.json:
+            print(json.dumps({
+                "ok": ok,
+                "path": str(raster.cached_path) if ok else None,
+                "error": "" if ok else raster.error,
+                "terminalSupported": raster.terminal_supported(),
+            }))
+            return 0 if ok else 4
+        if not ok:
             print(f"omarcharium backdrop check failed: {raster.error}", file=sys.stderr)
             return 4
         compatibility = "supported" if raster.terminal_supported() else "plain fallback in this terminal"

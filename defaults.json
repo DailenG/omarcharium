@@ -14,7 +14,7 @@
     "palette": "lagoon",
     "bubbleDensity": 55,
     "current": 1.0,
-    "showTelemetry": true,
+    "showTelemetry": false,
     "reefDensity": 50
   },
   "backdrop": {

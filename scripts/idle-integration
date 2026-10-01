@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-state_home=${XDG_STATE_HOME:-"$HOME/.local/state"}
+# Omarchy's first-party idle service and `omarchy-toggle-enabled` hardcode
+# $HOME/.local/state regardless of XDG_STATE_HOME. We match that path
+# exactly (instead of honoring XDG_STATE_HOME) so the toggle we create is
+# the same file the stock service and CLI actually observe.
+state_home="$HOME/.local/state"
 toggle_dir="$state_home/omarchy/toggles"
 toggle="$toggle_dir/screensaver-off"
 owner_dir="$state_home/omarcharium"
 owner="$owner_dir/owns-screensaver-off"
+lock_file="$owner_dir/.lock"
 
 umask 077
 
@@ -22,34 +27,78 @@ matches_ownership() {
     && cmp -s -- "$toggle" "$owner"
 }
 
+guard_owner_dir() {
+  # Refuse to operate through a symlinked ownership directory; otherwise an
+  # attacker controlling $state_home/omarcharium could redirect our writes
+  # or removals somewhere else entirely.
+  if [[ -L $owner_dir ]]; then
+    printf 'omarcharium: unsafe ownership directory: %s\n' "$owner_dir" >&2
+    exit 1
+  fi
+}
+
+# Bring $owner_dir into a known-safe state: a real, private directory we
+# control. Must happen before the lock file (which lives inside it) is
+# opened, since an attacker-controlled directory there could otherwise
+# redirect the lock -- and everything else -- elsewhere.
+prepare_owner_dir() {
+  mkdir -p -- "$owner_dir"
+  guard_owner_dir
+  chmod 700 -- "$owner_dir"
+}
+
+# Serialize enable/disable so a config reload racing a prior invocation (or
+# a second copy of this script) can never observe or create inconsistent
+# toggle/owner state. The lock lives inside the already-validated private
+# owner directory (not the shared state-home) and is refused outright if
+# something has replaced it with a symlink.
+acquire_lock() {
+  prepare_owner_dir
+  if [[ -L $lock_file ]]; then
+    printf 'omarcharium: refusing symlinked lock file: %s\n' "$lock_file" >&2
+    exit 1
+  fi
+  exec 9>"$lock_file"
+  flock "$1" 9
+}
+
 case ${1:-status} in
   enable)
-    mkdir -p -- "$toggle_dir" "$owner_dir"
-    if [[ ! -d $owner_dir || -L $owner_dir ]]; then
-      printf 'omarcharium: unsafe ownership directory: %s\n' "$owner_dir" >&2
-      exit 1
-    fi
-    chmod 700 -- "$owner_dir"
+    mkdir -p -- "$toggle_dir"
+    acquire_lock -x
     if [[ -L $toggle || -L $owner ]]; then
       printf 'omarcharium: refusing symlinked integration state\n' >&2
       exit 1
     fi
     if [[ ! -e $toggle ]]; then
+      # No stock toggle exists right now, so any leftover ownership record
+      # is orphaned: the toggle it used to match is gone and nothing can
+      # still be relying on it. Reclaim it instead of failing forever.
+      rm -f -- "$owner"
       marker=$(new_marker)
-      create_exclusive "$toggle" "$marker" || exit 1
+      if ! create_exclusive "$toggle" "$marker"; then
+        # Something else created the toggle in the window above; leave it
+        # untouched and fail rather than guessing at ownership.
+        exit 1
+      fi
       if ! create_exclusive "$owner" "$marker"; then
+        # Something recreated the owner record in the window above. We just
+        # created this toggle ourselves and know its exact content, so it is
+        # safe to remove -- but only if nothing has since replaced it.
         current=
         IFS= read -r current <"$toggle" || true
         [[ $current == "${marker%$'\n'}" ]] && rm -f -- "$toggle"
         exit 1
       fi
     elif [[ -f $toggle && -f $owner && ! -s $toggle && ! -s $owner ]]; then
+      # Legacy zero-byte marker pair from an older release: migrate in place.
       marker=$(new_marker)
       printf '%s' "$marker" >"$toggle"
       printf '%s' "$marker" >"$owner"
     fi
     ;;
   disable)
+    acquire_lock -x
     if matches_ownership; then
       rm -f -- "$toggle"
     fi

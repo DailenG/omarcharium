@@ -36,7 +36,7 @@ A living, terminal-native tropical aquarium for Omarchy. Omarcharium turns every
   </tr>
   <tr>
     <td align="center"><strong>Tray-hosted control room</strong><br />Local status, image backdrops, and layered environmental controls.</td>
-    <td align="center"><strong>Terminal reef in motion</strong><br />Truecolor fish, caustics, bubbles, kelp, coral, and a local status display.</td>
+    <td align="center"><strong>Terminal reef in motion</strong><br />Truecolor fish, caustics, bubbles, kelp, and coral. Status display shown enabled; it is off by default.</td>
   </tr>
 </table>
 
@@ -118,7 +118,7 @@ The control room writes settings atomically inside a mode-`0700` directory:
 ~/.config/omarcharium/config.json
 ```
 
-Every species has an exact independent population. The water column controls palette, bubbles, current velocity, reef density, and the terminal status display. Backdrop controls select Plain Depth, Pelagic Field, or a local image through Omarchy's native image picker, with fit, dimming, and independently layered pelagic effects. Ambience controls master generation, volume, and independent water flow and bubble channels. Surface controls can keep the reef visible during pointer movement while clicks and keyboard input continue to dismiss it.
+Every species has an exact independent population. The water column controls palette, bubbles, current velocity, reef density, and the optional terminal status display (off by default for a text-free reef). Turn on **show status display** to see the header, biomass/palette, dismissal hints, and backdrop notices. Saved choices remain unchanged. Backdrop controls select Plain Depth, Pelagic Field, or a local image through Omarchy's native image picker, with fit, dimming, and independently layered pelagic effects. The control-room image preview uses a bounded derived PNG rather than decoding the original image in the shell. Ambience controls master generation, volume, and independent water flow and bubble channels. Surface controls can keep the reef visible during pointer movement while clicks and keyboard input continue to dismiss it.
 
 See the complete [configuration reference](docs/CONFIGURATION.md) for limits, defaults, JSON schema, and diagnostics.
 
@@ -147,13 +147,15 @@ The diagnostic plays three clearly audible rising tones before transitioning int
 
 ## Idle and lock behavior
 
-**Automatic Idle Immersion** follows `idle.screensaver` from `~/.config/omarchy/shell.json`. Omarchy's first-party service continues to own locking and honors the existing `idle.lock` deadline.
+**Automatic Idle Immersion** follows `idle.screensaver` from `~/.config/omarchy/shell.json` and honors Omarchy's **Keep Awake** quick-bar setting. Locking remains under Omarchy's first-party idle service and continues to use `idle.lock`. Omarchy's Keep Awake and screensaver toggle paths use `$HOME/.local/state` even when `XDG_STATE_HOME` differs.
 
 To prevent the stock TTE saver and Omarcharium from opening together, Omarcharium temporarily uses Omarchy's existing `screensaver-off` toggle:
 
-- an absent toggle and private ownership record receive the same unique marker;
+- an absent toggle and private ownership record receive the same unique marker; stale ownership is reclaimed only if the toggle is absent;
+- automatic immersion starts only after Omarcharium confirms its toggle ownership; a pre-existing user-owned toggle suppresses automatic immersion;
 - a pre-existing, replaced, mismatched, or symlinked toggle is never claimed or removed;
 - disabling idle integration, disabling the plugin, or removing it releases only state whose two ownership markers still match;
+- Keep Awake suppresses automatic immersion, but manual tray/IPC launching remains available;
 - no Hyprland or `/usr/share/omarchy/` file is modified.
 
 Implementation details and trust boundaries are documented in [Architecture](docs/ARCHITECTURE.md) and [Security Policy](SECURITY.md).
