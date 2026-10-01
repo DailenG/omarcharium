@@ -967,7 +967,7 @@ Item {
               Text { anchors.centerIn: parent; text: "CLEAR IMAGE"; color: "#b6d0d5"; font.family: root.fontFamily; font.pixelSize: 10; font.bold: true }
               MouseArea { anchors.fill: parent; enabled: root.config.backdrop.imagePath !== ""; onClicked: root.clearBackdropImage() }
             }
-            Text { x: 342; y: 87; width: parent.width - 358; text: root.config.backdrop.imagePath || "Omarchy picker scans Pictures, Downloads, and Home"; color: "#718f98"; font.family: root.fontFamily; font.pixelSize: 9; elide: Text.ElideMiddle; wrapMode: Text.Wrap }
+            Text { x: 342; y: 87; width: parent.width - 358; text: root.config.backdrop.imagePath || "Omarchy picker scans Pictures, Downloads, and Home"; textFormat: Text.PlainText; color: "#718f98"; font.family: root.fontFamily; font.pixelSize: 9; elide: Text.ElideMiddle; wrapMode: Text.Wrap }
             Text { x: 342; y: 139; width: parent.width - 358; text: "native raster: Ghostty + Kitty · plain fallback: Alacritty + Foot"; color: "#5f8993"; font.family: root.fontFamily; font.pixelSize: 9; wrapMode: Text.Wrap }
 
             Text { x: 16; y: 194; text: "IMAGE FIT"; color: "#a9c6cc"; font.family: root.fontFamily; font.pixelSize: 11 }

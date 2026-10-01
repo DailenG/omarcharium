@@ -4,6 +4,12 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ## Unreleased
 
+## [1.0.12] - 2026-09-30
+
+### Security
+
+- Render the selected backdrop filename as plain text in the control room, preventing Qt rich-text interpretation of crafted local paths and resolving the marketplace review blocker ([#4456](https://github.com/omacom/omarchy-plugin-marketplace/issues/4456)).
+
 ## [1.0.11] - 2026-09-30
 
 ### Changed
@@ -131,6 +137,7 @@ All notable changes are documented here. This project follows [Semantic Versioni
 - Deterministic renderer snapshots, configuration normalization, and behavioral tests.
 - Marketplace manifest, preview artwork, actual screenshots, contributor guide, security policy, and CI validation.
 
+[1.0.12]: https://github.com/DailenG/omarcharium/releases/tag/v1.0.12
 [1.0.11]: https://github.com/DailenG/omarcharium/releases/tag/v1.0.11
 [1.0.10]: https://github.com/DailenG/omarcharium/releases/tag/v1.0.10
 [1.0.9]: https://github.com/DailenG/omarcharium/releases/tag/v1.0.9
